@@ -1,0 +1,11 @@
+# Données brutes et artefacts (lourds, reproductibles depuis le code)
+data/raw/*.csv
+artifacts/
+results/
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+# Divers
+.DS_Store
+data/raw/swat/merged.csv
