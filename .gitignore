@@ -9,3 +9,4 @@ __pycache__/
 # Divers
 .DS_Store
 data/raw/swat/merged.csv
+Note.txt
