@@ -1,6 +1,9 @@
 """
 whitebox_run.py
 ═══════════════
+Runner white-box UNIFIÉ. Remplace whitebox_fgsm_multirun.py,
+whitebox_pgd_multirun.py, whitebox_cw_multirun.py (et les vieux
+whitebox_multirun*.py) par un seul script piloté par --attack.
 
 Usage :
   python src/whitebox_run.py --dataset swat    --eps 0.1 --attack all
@@ -140,7 +143,10 @@ def main():
 
     X_test, y_test, mlp_w, logreg_w, xgb_w = load_victims(SAVE_DIR, DEVICE)
     victims = {"MLP": mlp_w, "LogReg": logreg_w, "XGBoost": xgb_w}
-    timestamps_test, has_ts = load_timestamps(SAVE_DIR)
+    timestamps_test, has_ts_file = load_timestamps(SAVE_DIR)
+    if args.timestamps == "on" and not has_ts_file:
+        raise SystemExit("--timestamps on : timestamps_test.npy absent. Relance 00_train.py.")
+    has_ts = has_ts_file and args.timestamps != "off"
 
     # Un accumulateur par attaque
     results   = {a: [] for a in attacks}

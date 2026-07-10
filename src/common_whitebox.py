@@ -48,6 +48,9 @@ def build_arg_parser(description=""):
     parser.add_argument("--persample_n", default=50, type=int,
                         help="Nb max de samples gardés par (seed, modèle) dans le "
                              "CSV par-échantillon (analyse temporelle / timestamps)")
+    parser.add_argument("--timestamps", default="auto", choices=["auto", "on", "off"],
+                        help="Export par-échantillon (timestamps) : "
+                             "auto=si dispo, on=forcer (erreur si absent), off=désactiver")
     return parser
 
 
@@ -157,3 +160,38 @@ VICTIMS_SPEC = [
     ("LogReg",  True,  False),
     ("XGBoost", False, True),
 ]
+
+
+# ══════════════════════════════════════════════════════════════
+# VICTIMES DÉFENDUES (une défense canonique par modèle de base)
+# ══════════════════════════════════════════════════════════════
+
+_DEFENDED_MLP_FILES = {"at_fgsm": "mlp_at_fgsm.pt", "at_pgd": "mlp_at_pgd.pt"}
+
+
+def load_victims_defended(save_dir, device, mlp_defense="at_pgd"):
+    """
+    Charge le jeu de victimes DÉFENDUES pour l'évaluation adaptative :
+      MLP → mlp_at_{mlp_defense}.pt | LogReg → logreg_aug_fgsm.pkl
+      XGBoost → xgb_iter_fgsm_r3.json
+    Même signature de retour que load_victims (interchangeable).
+    """
+    X_test = np.load(save_dir / "X_test.npy")
+    y_test = np.load(save_dir / "y_test.npy")
+
+    mlp_file  = _DEFENDED_MLP_FILES[mlp_defense]
+    mlp_model = MLP(input_size=X_test.shape[1]).to(device)
+    mlp_model.load_state_dict(torch.load(save_dir / mlp_file, map_location=device))
+    mlp_model.eval()
+    mlp_w = MLPWrapper(mlp_model, device)
+
+    logreg_w = LogRegWrapper(joblib.load(save_dir / "logreg_aug_fgsm.pkl"))
+
+    xgb_model = XGBClassifier()
+    xgb_model.load_model(str(save_dir / "xgb_iter_fgsm_r3.json"))
+    xgb_w = XGBoostWrapper(xgb_model)
+
+    print(f"\n✓ Modèles DÉFENDUS chargés depuis {save_dir}")
+    print(f"  MLP={mlp_file} | LogReg=logreg_aug_fgsm.pkl | XGB=xgb_iter_fgsm_r3.json")
+    print(f"  X_test : {X_test.shape} — attaques : {int(y_test.sum())} / {len(y_test)}")
+    return X_test, y_test, mlp_w, logreg_w, xgb_w
