@@ -43,7 +43,7 @@ import torch
 warnings.filterwarnings("ignore")
 
 from common import (SEED, THRESHOLD, set_all_seeds, artifacts_dir, results_dir,
-                    eval_attack, eval_attack_persample)
+                    eval_attack, eval_attack_persample, subsample_for_substitute)
 from common_whitebox import (get_device, eval_sizes, build_per_model_eval,
                              load_victims, load_victims_defended, load_timestamps)
 from models import MLP, SmallMLP, DeepMLP
@@ -187,6 +187,7 @@ def main():
     y_train = np.load(SAVE / "y_train.npy")
     X_val   = np.load(SAVE / "X_val.npy")
     y_val   = np.load(SAVE / "y_val.npy")
+    X_train, y_train = subsample_for_substitute(X_train, y_train)
 
     timestamps_test, has_ts_file = load_timestamps(SAVE)
     if args.timestamps == "on" and not has_ts_file:

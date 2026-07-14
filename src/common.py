@@ -63,6 +63,24 @@ def results_dir(dataset: str) -> Path:
     return d
 
 
+def subsample_for_substitute(X, y, max_n=100_000, seed=SEED):
+    """
+    Sous-échantillonne (X, y) avant l'entraînement d'un substitut black-box.
+
+    Sur SWaT (922 700 lignes), entraîner 3 substituts par seed sur le train
+    set complet est le vrai goulot du pipeline transfer (30 entraînements
+    complets sur ~1M lignes, en CPU). Un sous-échantillon aléatoire de
+    max_n lignes garde le ratio de classes (tirage uniforme) et suffit très
+    largement à entraîner un substitut représentatif — un attaquant réel n'a
+    de toute façon jamais accès au train set complet de la victime.
+    """
+    if len(X) <= max_n:
+        return X, y
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(X), max_n, replace=False)
+    return X[idx], y[idx]
+
+
 # ══════════════════════════════════════════════════════════════
 # 3. REPRODUCTIBILITÉ
 # ══════════════════════════════════════════════════════════════

@@ -41,7 +41,8 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
-from common import THRESHOLD, set_all_seeds, artifacts_dir, results_dir, eval_attack
+from common import (THRESHOLD, set_all_seeds, artifacts_dir, results_dir, eval_attack,
+                    subsample_for_substitute)
 from common_whitebox import get_device, eval_sizes, build_per_model_eval
 from models import MLP, SmallMLP, DeepMLP
 from blackbox import square_attack, nes_attack, hsja, rays
@@ -183,6 +184,7 @@ def main():
     y_train = np.load(save / "y_train.npy")
     X_val   = np.load(save / "X_val.npy")
     y_val   = np.load(save / "y_val.npy")
+    X_train, y_train = subsample_for_substitute(X_train, y_train)
     input_size = X_test.shape[1]
 
     baseline = load_baseline_asr(res, ds, eps)
