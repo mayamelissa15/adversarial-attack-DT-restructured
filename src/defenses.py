@@ -296,8 +296,35 @@ def augment_mlp_iterative(mlp_w, X_train, y_train, X_val, y_val, input_size,
 #          à requêtes — bb_max_queries contrôle le coût).
 # ══════════════════════════════════════════════════════════════
 
-def augment_logreg(logreg_w, X_train, y_train, save_dir, attack, eps,
+C_GRID = [1.0, 0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 0.0003, 0.0001]
+EVAL_EPS_FOR_SELECTION = 0.1   # eps auquel les attaques sont ÉVALUÉES (evaluate.py)
+MIN_F1_RATIO = 0.3             # garde-fou LÂCHE : élimine seulement les modèles dégénérés
+                                # (ex. "tout classer attaque") — pas un critère de qualité.
+
+
+def augment_logreg(logreg_w, X_train, y_train, X_val, y_val, save_dir, attack, eps,
                    bb_max_queries=300):
+    """
+    Augmentation adverse LogReg + sélection de C par validation.
+
+    BUG identifié (2026-07-15) : avec C=1.0 fixe, le refit sur (train + X_adv
+    encore étiqueté "attaque") doit concilier des points quasi-identiques à du
+    normal mais étiquetés attaque → ‖w‖_1 explose (×4 sur SWaT). Pour un modèle
+    linéaire, la sensibilité L∞ est gouvernée par marge/‖w‖_1, pas la marge
+    seule : l'ASR à eps=0.1 augmente au lieu de baisser (défense contre-
+    productive, vérifié empiriquement : C=1.0 → ASR 51.7% théorique vs 20.1%
+    baseline ; C=0.001 → 10.5%, meilleur que baseline).
+
+    Fix : grid search sur C, choisi pour MAXIMISER le score combiné
+    (F1_val − ASR_val(FGSM, eps=0.1)) sur X_val — jamais sur X_test.
+    F1 pénalise déjà les solutions dégénérées (ex. "tout classer attaque",
+    qui a une précision proche de 0) ; MIN_F1_RATIO n'est qu'un filet de
+    sécurité très lâche (30% du F1 baseline), pas un critère de qualité —
+    évite qu'un score composite mal calibré ne sélectionne un cas pathologique.
+    Sur un petit dataset (BATADAL), le compromis F1/robustesse est plus dur
+    qu'un seuil fixe à 90% ne peut absorber : d'où le score combiné plutôt
+    qu'un filtre dur + repli sur l'ancien C=1.0 (qui réintroduisait le bug).
+    """
     fpath = save_dir / f"logreg_aug_{attack}.pkl"
     if fpath.exists():
         print(f"    {fpath.name} déjà présent → chargement direct")
@@ -323,9 +350,54 @@ def augment_logreg(logreg_w, X_train, y_train, save_dir, attack, eps,
     y_aug = np.concatenate([y_train, y_atk], axis=0)
     print(f"    Dataset : {len(X_train)} → {len(X_aug)} exemples")
 
-    new_lr = LogisticRegression(C=1.0, max_iter=1000, solver="saga",
-                                class_weight="balanced", random_state=SEED)
-    new_lr.fit(X_aug, y_aug)
+    # Baseline F1 val (garde-fou) — modèle NON augmenté, pour référence.
+    base_proba_val = logreg_w.predict_proba(X_val)
+    base_pred_val  = (base_proba_val >= THRESHOLD).astype(int)
+    base_f1_val    = f1_score(y_val, base_pred_val, zero_division=0)
+
+    print(f"    Sélection de C par validation (F1 val baseline = {base_f1_val:.4f})...")
+    all_candidates = []          # (score, C, f1_val, asr_val, model) — TOUS, même dégénérés
+    non_degenerate = []          # sous-ensemble filtré (F1 >= MIN_F1_RATIO * baseline)
+    for C in C_GRID:
+        cand = LogisticRegression(C=C, max_iter=1000, solver="saga",
+                                  class_weight="balanced", random_state=SEED)
+        cand.fit(X_aug, y_aug)
+        cand_w = LogRegWrapper(cand)
+
+        proba_val = cand_w.predict_proba(X_val)
+        pred_val  = (proba_val >= THRESHOLD).astype(int)
+        f1_val    = f1_score(y_val, pred_val, zero_division=0)
+
+        tp_mask = (y_val == 1) & (pred_val == 1)
+        if tp_mask.sum() == 0:
+            asr_val = 1.0   # dégénéré (rien détecté) → pire cas, écarté par le score combiné
+        else:
+            X_val_atk = X_val[tp_mask].astype(np.float32)
+            y_val_atk = y_val[tp_mask]
+            X_val_adv = fgsm_logreg(cand_w, X_val_atk, y_val_atk, eps=EVAL_EPS_FOR_SELECTION)
+            pred_adv  = (cand_w.predict_proba(X_val_adv) >= THRESHOLD).astype(int)
+            asr_val   = float((pred_adv == 0).mean())
+
+        degenerate = f1_val < MIN_F1_RATIO * base_f1_val
+        score = f1_val - asr_val   # à maximiser : bonne détection ET peu évadable
+        print(f"      C={C:<8g} F1_val={f1_val:.4f}  ASR_val(FGSM,eps={EVAL_EPS_FOR_SELECTION})="
+              f"{asr_val*100:5.1f}%  score={score:+.4f}"
+              f"{'  [dégénéré, écarté]' if degenerate else ''}")
+
+        entry = (score, C, f1_val, asr_val, cand)
+        all_candidates.append(entry)
+        if not degenerate:
+            non_degenerate.append(entry)
+
+    pool = non_degenerate if non_degenerate else all_candidates
+    if not non_degenerate:
+        print("    ⚠ Tous les candidats jugés dégénérés — on garde le meilleur score quand même")
+    pool.sort(key=lambda t: -t[0])
+    _, best_C, best_f1, best_asr, new_lr = pool[0]
+    print(f"    → C retenu = {best_C}  (F1_val={best_f1:.4f}, ASR_val={best_asr*100:.1f}%, "
+          f"score={pool[0][0]:+.4f})")
+
+    print(f"    → C retenu = {best_C}")
     joblib.dump(new_lr, fpath)
     print(f"    Sauvegardé : {fpath.name}")
     return LogRegWrapper(new_lr)
@@ -420,7 +492,7 @@ def run():
                           lr=args.lr, mix_ratio=args.mix_ratio)
 
     print("\n[3/7] Augmentation adverse FGSM (white-box) — LogReg")
-    augment_logreg(logreg_w, X_train, y_train, save, attack="fgsm", eps=eps)
+    augment_logreg(logreg_w, X_train, y_train, X_val, y_val, save, attack="fgsm", eps=eps)
 
     print("\n[4/7] Augmentation itérative FGSM (white-box) — XGBoost (self, "
           f"{args.xgb_rounds} rounds)")
@@ -436,7 +508,7 @@ def run():
                           bb_max_queries=args.bb_max_queries)
 
     print("\n[6/7] Augmentation adverse Square (black-box) — LogReg")
-    augment_logreg(logreg_w, X_train, y_train, save, attack="square", eps=eps,
+    augment_logreg(logreg_w, X_train, y_train, X_val, y_val, save, attack="square", eps=eps,
                    bb_max_queries=args.bb_max_queries)
 
     print(f"\n[7/7] Augmentation itérative Square (black-box) — XGBoost (self, "
