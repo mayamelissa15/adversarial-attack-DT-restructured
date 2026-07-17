@@ -3,8 +3,8 @@
 Code de thèse : robustesse adversariale de modèles de détection d'anomalies/intrusions (ML) pour les systèmes de contrôle industriel (ICS).
 
 Deux jeux de données :
-- **SWaT** — testbed réel de traitement d'eau (iTrust, Singapour), 51 capteurs/actionneurs, 6 étapes de process (P1–P6).
-- **BATADAL** — réseau de distribution d'eau simulé (challenge EPANET), 43 features.
+- **SWaT**   testbed réel de traitement d'eau (iTrust, Singapour), 51 capteurs/actionneurs, 6 étapes de process (P1–P6).
+- **BATADAL**   réseau de distribution d'eau simulé (challenge EPANET), 43 features.
 
 Trois modèles de référence (MLP, LogReg, XGBoost) sont entraînés en détection propre, puis attaqués sous 4 familles de menaces :
 - **Boîte blanche** (accès au gradient) : FGSM, PGD, C&W
@@ -18,7 +18,7 @@ Sept versions durcies des modèles (entraînement adversarial, augmentation par 
 
 Deux environnements séparés :
 
-**Entraînement / attaques / défenses** (torch, xgboost, scikit-learn — plus lourd) :
+**Entraînement / attaques / défenses** (torch, xgboost, scikit-learn   plus lourd) :
 ```bash
 python3 -m venv .venv-train
 source .venv-train/bin/activate
