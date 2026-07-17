@@ -1,6 +1,6 @@
 # these_adv
 
-Code de thèse : robustesse adversariale de modèles de détection d'anomalies/intrusions (ML) pour les systèmes de contrôle industriel (ICS).
+Code de thèse : robustesse adversariale de modèles de détection d'anomalies/intrusions (ML) pour les systèmes de contrôle industriel (ICS) dans un contexte de DIGITAL TWIN
 
 Deux jeux de données :
 - **SWaT**   testbed réel de traitement d'eau (iTrust, Singapour), 51 capteurs/actionneurs, 6 étapes de process (P1–P6).
