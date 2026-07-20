@@ -20,10 +20,11 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 warnings.filterwarnings("ignore")
 
-from common import results_dir
+from common import results_dir, RESULTS_DIR
 
 
 # ══════════════════════════════════════════════════════════════
@@ -232,6 +233,317 @@ def bar_baseline_vs_defended(df_base, df_def, attack_order, title, outpath):
 
 
 # ══════════════════════════════════════════════════════════════
+# OVERVIEW ANGLAIS — 3 panneaux (transfer / score / decision) avec
+# labels % au-dessus des barres, format article.
+# ══════════════════════════════════════════════════════════════
+
+def _label_bars(ax, xpos, vals):
+    for xi, v in zip(xpos, vals):
+        if np.isnan(v):
+            continue
+        ax.text(xi, v + 1.5, f"{v:.0f}%", ha="center", va="bottom", fontsize=8)
+
+
+def _bar_panel(ax, df, attack_order, title, value_col="asr"):
+    agg = (df.groupby(["attack", "model"])[value_col]
+             .agg(["median", "std"]).reset_index())
+    attacks = [a for a in attack_order if a in agg["attack"].unique()]
+    models  = [m for m in MODEL_ORDER if m in agg["model"].unique()]
+    if not attacks or not models:
+        ax.set_visible(False)
+        return
+
+    n_models = len(models)
+    x = np.arange(len(attacks))
+    w = 0.8 / n_models
+    _style_axis(ax)
+
+    ymax = 20.0
+    for i, model in enumerate(models):
+        vals, errs = [], []
+        for a in attacks:
+            row = agg[(agg["attack"] == a) & (agg["model"] == model)]
+            vals.append(float(row["median"].iloc[0]) * 100 if not row.empty else np.nan)
+            errs.append(float(row["std"].fillna(0).iloc[0]) * 100 if not row.empty else 0)
+        xpos = x + (i - n_models / 2 + 0.5) * w
+        ax.bar(xpos, vals, width=w * 0.88, color=MODEL_COLOR[model], label=model,
+               yerr=errs, capsize=2, zorder=3, edgecolor="white", linewidth=0.5)
+        _label_bars(ax, xpos, vals)
+        ymax = max(ymax, *[v + e for v, e in zip(vals, errs) if not np.isnan(v)])
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(attacks, fontsize=9)
+    ax.set_title(title, fontsize=9.5, fontweight="bold")
+    ax.legend(frameon=False, fontsize=7, loc="upper left")
+    ax.set_ylim(0, min(ymax + 15, 108))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}%"))
+
+
+def fig_blackbox_overview(res_dir, ds, eps, out_dir):
+    bb = load_blackbox_baseline(res_dir, ds, eps)
+    if bb is None:
+        print("  (rien à tracer) overview blackbox (en)")
+        return
+
+    tr = bb[bb["family"] == "Transfer"].copy()
+    sd = bb[bb["family"] == "Score-based"].copy()
+    db = bb[bb["family"] == "Decision-based"].copy()
+    if tr.empty and sd.empty and db.empty:
+        print("  (rien à tracer) overview blackbox (en)")
+        return
+    tr["attack"] = tr["attack"].apply(collapse_transfer_attack)
+
+    n_tr = tr["seed"].nunique() if not tr.empty else 0
+    n_sd = sd["seed"].nunique() if not sd.empty else 0
+    n_db = db["seed"].nunique() if not db.empty else 0
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.3))
+
+    _bar_panel(axes[0], tr, ["MI-FGSM", "VMI-FGSM", "Ensemble-MI"],
+              f"Transfer attacks — Median ASR over {n_tr} runs (ε = {eps})")
+    _bar_panel(axes[1], sd, ["Square", "NES"],
+              f"Score-based attacks — Median ASR over {n_sd} runs (ε = {eps})")
+    _bar_panel(axes[2], db, ["HSJA", "RayS"],
+              f"Decision-based attacks — Median ASR over {n_db} runs (ε = {eps})")
+    axes[0].set_ylabel("Attack Success Rate (ASR)")
+
+    captions = ["(a) Transfer-based attacks.",
+               "(b) Score-based attacks.",
+               f"(c) Decision-based attacks ({n_db} runs)."]
+    for ax, cap in zip(axes, captions):
+        ax.text(0.5, -0.22, cap, transform=ax.transAxes, ha="center", fontsize=9.5)
+
+    fig.tight_layout(rect=[0, 0.05, 1, 1])
+    outp = out_dir / f"overview_blackbox_{ds}_en.png"
+    fig.savefig(outp, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {outp.name}")
+
+
+# ══════════════════════════════════════════════════════════════
+# OVERVIEW COMBINÉ — SWaT + BATADAL dans un seul plot (3 panneaux,
+# couleur = modèle, hachure = dataset). Pour l'article (limite de place).
+# ══════════════════════════════════════════════════════════════
+
+DATASET_HATCH = {"swat": "", "batadal": "///"}
+DATASET_LABEL = {"swat": "SWaT", "batadal": "BATADAL"}
+
+
+def _bar_panel_combined(ax, df, attack_order, title, value_col="asr"):
+    agg = (df.groupby(["attack", "model", "dataset"])[value_col]
+             .agg(["median", "std"]).reset_index())
+    attacks  = [a for a in attack_order if a in agg["attack"].unique()]
+    models   = [m for m in MODEL_ORDER if m in agg["model"].unique()]
+    datasets = [d for d in ["swat", "batadal"] if d in agg["dataset"].unique()]
+    if not attacks or not models or not datasets:
+        ax.set_visible(False)
+        return
+
+    _style_axis(ax)
+    n_bars = len(models) * len(datasets)
+    x = np.arange(len(attacks))
+    w = 0.85 / n_bars
+
+    ymax = 20.0
+    bar_idx = 0
+    for model in models:
+        for ds in datasets:
+            vals, errs = [], []
+            for a in attacks:
+                row = agg[(agg["attack"] == a) & (agg["model"] == model) & (agg["dataset"] == ds)]
+                vals.append(float(row["median"].iloc[0]) * 100 if not row.empty else np.nan)
+                errs.append(float(row["std"].fillna(0).iloc[0]) * 100 if not row.empty else 0)
+            xpos = x + (bar_idx - n_bars / 2 + 0.5) * w
+            ax.bar(xpos, vals, width=w * 0.92, color=MODEL_COLOR[model],
+                   hatch=DATASET_HATCH[ds], edgecolor="white", linewidth=0.5,
+                   yerr=errs, capsize=1.5, zorder=3)
+            for xi, v in zip(xpos, vals):
+                if not np.isnan(v):
+                    ax.text(xi, v + 2, f"{v:.0f}", ha="center", va="bottom", fontsize=7)
+            finite = [v + e for v, e in zip(vals, errs) if not np.isnan(v)]
+            if finite:
+                ymax = max(ymax, *finite)
+            bar_idx += 1
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(attacks, fontsize=9)
+    ax.set_title(title, fontsize=9.5, fontweight="bold")
+    ax.set_ylim(0, min(ymax + 22, 112))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}%"))
+
+
+def fig_blackbox_overview_combined(eps, datasets=("swat", "batadal")):
+    print(f"\n{'═'*60}\n  PLOT COMBINÉ — {' + '.join(d.upper() for d in datasets)}\n{'═'*60}")
+
+    dfs = []
+    for ds in datasets:
+        bb = load_blackbox_baseline(results_dir(ds), ds, eps)
+        if bb is not None:
+            dfs.append(bb)
+    if not dfs:
+        print("  (rien à tracer) overview combiné")
+        return
+    bb = pd.concat(dfs, ignore_index=True)
+
+    tr = bb[bb["family"] == "Transfer"].copy()
+    sd = bb[bb["family"] == "Score-based"].copy()
+    db = bb[bb["family"] == "Decision-based"].copy()
+    tr["attack"] = tr["attack"].apply(collapse_transfer_attack)
+
+    n_tr = tr["seed"].nunique() if not tr.empty else 0
+    n_sd = sd["seed"].nunique() if not sd.empty else 0
+    n_db = db["seed"].nunique() if not db.empty else 0
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
+
+    _bar_panel_combined(axes[0], tr, ["MI-FGSM", "VMI-FGSM", "Ensemble-MI"],
+                        f"Transfer attacks — Median ASR over {n_tr} runs (ε = {eps})")
+    _bar_panel_combined(axes[1], sd, ["Square", "NES"],
+                        f"Score-based attacks — Median ASR over {n_sd} runs (ε = {eps})")
+    _bar_panel_combined(axes[2], db, ["HSJA", "RayS"],
+                        f"Decision-based attacks — Median ASR over {n_db} runs (ε = {eps})")
+    axes[0].set_ylabel("Attack Success Rate (ASR)")
+
+    captions = ["(a) Transfer-based attacks.",
+               "(b) Score-based attacks.",
+               f"(c) Decision-based attacks ({n_db} runs)."]
+    for ax, cap in zip(axes, captions):
+        ax.text(0.5, -0.20, cap, transform=ax.transAxes, ha="center", fontsize=9.5)
+
+    model_handles = [plt.Rectangle((0, 0), 1, 1, fc=MODEL_COLOR[m], ec="none") for m in MODEL_ORDER]
+    dataset_handles = [plt.Rectangle((0, 0), 1, 1, fc="white", ec="black",
+                                     hatch=DATASET_HATCH[d]) for d in datasets]
+    fig.legend(model_handles + dataset_handles,
+              MODEL_ORDER + [DATASET_LABEL[d] for d in datasets],
+              loc="upper center", ncol=len(MODEL_ORDER) + len(datasets),
+              frameon=False, fontsize=9.5, bbox_to_anchor=(0.5, 1.10))
+
+    fig.tight_layout(rect=[0, 0.05, 1, 1])
+    out_dir = RESULTS_DIR / "combined" / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    outp = out_dir / "overview_blackbox_all_en.png"
+    fig.savefig(outp, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ {outp}")
+
+
+# ══════════════════════════════════════════════════════════════
+# OVERVIEW DÉFENSES COMBINÉ — SWaT + BATADAL, 1 panneau par modèle
+# (baseline vs. défenses restantes), hachure = dataset. Défenses
+# à base de Square exclues (résultats contre-productifs).
+# ══════════════════════════════════════════════════════════════
+
+FAMILY_COLOR = {"Baseline": "#B0B0B0", "FGSM": "#D55E00", "PGD": "#7570B3"}
+FAMILY_LABEL = {"Baseline": "Baseline", "FGSM": "FGSM-based defense", "PGD": "PGD-based defense"}
+
+
+def _defense_family(name):
+    if name == "Baseline":
+        return "Baseline"
+    return "PGD" if "PGD" in name else "FGSM"
+
+
+def _bar_panel_defense(ax, df, attack_order, title, datasets, series_order):
+    attacks = [a for a in attack_order if a in df["attack"].unique()]
+    if not attacks or not series_order:
+        ax.set_visible(False)
+        return
+
+    _style_axis(ax)
+    n_bars = len(series_order) * len(datasets)
+    x = np.arange(len(attacks))
+    w = 0.85 / n_bars
+
+    ymax = 20.0
+    bar_idx = 0
+    for s in series_order:
+        color = FAMILY_COLOR[_defense_family(s)]
+        for ds in datasets:
+            vals = []
+            for a in attacks:
+                row = df[(df["attack"] == a) & (df["series"] == s) & (df["dataset"] == ds)]
+                vals.append(float(row["value"].iloc[0]) if not row.empty else np.nan)
+            xpos = x + (bar_idx - n_bars / 2 + 0.5) * w
+            ax.bar(xpos, vals, width=w * 0.92, color=color, hatch=DATASET_HATCH[ds],
+                  edgecolor="white", linewidth=0.5, zorder=3)
+            finite = [v for v in vals if not np.isnan(v)]
+            if finite:
+                ymax = max(ymax, *finite)
+            bar_idx += 1
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(attacks, fontsize=8.5, rotation=20, ha="right")
+    ax.set_title(title, fontsize=9.5, fontweight="bold")
+    ax.set_ylim(0, min(ymax + 15, 108))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}%"))
+
+
+def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude_substr="square"):
+    print(f"\n{'═'*60}\n  PLOT DÉFENSES COMBINÉ — {' + '.join(d.upper() for d in datasets)}\n{'═'*60}")
+
+    rows = []
+    for ds in datasets:
+        data = load_defense_json(results_dir(ds), "defense_results_blackbox.json")
+        if not data:
+            continue
+        for base_model, defenses in data.items():
+            for defense, attacks in defenses.items():
+                if exclude_substr in defense.lower():
+                    continue
+                for attack, m in attacks.items():
+                    attack_c = collapse_transfer_attack(attack)
+                    rows.append({"dataset": ds, "base_model": base_model, "series": defense,
+                                "attack": attack_c, "value": m["asr_median"]})
+                    rows.append({"dataset": ds, "base_model": base_model, "series": "Baseline",
+                                "attack": attack_c, "value": m["baseline_asr"]})
+    if not rows:
+        print("  (rien à tracer) overview défenses")
+        return
+    df = (pd.DataFrame(rows)
+            .groupby(["dataset", "base_model", "series", "attack"], as_index=False)["value"].mean())
+
+    attack_order = ["MI-FGSM", "VMI-FGSM", "Ensemble-MI", "Square", "NES", "HSJA", "RayS"]
+    models = [m for m in MODEL_ORDER if m in df["base_model"].unique()]
+    if not models:
+        print("  (rien à tracer) overview défenses")
+        return
+
+    fig, axes = plt.subplots(1, len(models), figsize=(6.2 * len(models), 4.6))
+    if len(models) == 1:
+        axes = [axes]
+
+    for ax, bm in zip(axes, models):
+        sub = df[df["base_model"] == bm]
+        series_order = sorted(sub["series"].unique(),
+                              key=lambda s: (0 if s == "Baseline" else (2 if "PGD" in s else 1), s))
+        _bar_panel_defense(ax, sub, attack_order,
+                          f"{bm} — baseline vs. defenses (ε = {eps})", datasets, series_order)
+    axes[0].set_ylabel("Attack Success Rate (ASR)")
+
+    captions = [f"({chr(97 + i)}) {bm}." for i, bm in enumerate(models)]
+    for ax, cap in zip(axes, captions):
+        ax.text(0.5, -0.30, cap, transform=ax.transAxes, ha="center", fontsize=9.5)
+
+    families_present = sorted({_defense_family(s) for s in df["series"].unique()},
+                              key=lambda f: {"Baseline": 0, "FGSM": 1, "PGD": 2}[f])
+    color_handles = [plt.Rectangle((0, 0), 1, 1, fc=FAMILY_COLOR[f], ec="none") for f in families_present]
+    dataset_handles = [plt.Rectangle((0, 0), 1, 1, fc="white", ec="black",
+                                     hatch=DATASET_HATCH[d]) for d in datasets]
+    fig.legend(color_handles + dataset_handles,
+              [FAMILY_LABEL[f] for f in families_present] + [DATASET_LABEL[d] for d in datasets],
+              loc="upper center", ncol=len(families_present) + len(datasets),
+              frameon=False, fontsize=9.5, bbox_to_anchor=(0.5, 1.12))
+
+    fig.tight_layout(rect=[0, 0.07, 1, 1])
+    out_dir = RESULTS_DIR / "combined" / "plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    outp = out_dir / "overview_defenses_all_en.png"
+    fig.savefig(outp, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ {outp}")
+
+
+# ══════════════════════════════════════════════════════════════
 # MAIN — un dataset
 # ══════════════════════════════════════════════════════════════
 
@@ -275,6 +587,9 @@ def run_dataset(ds, eps):
             box_asr(tr_overview, ["MI-FGSM", "VMI-FGSM", "Ensemble-MI"],
                    f"Blackbox transfer — distribution par seed — {ds.upper()}",
                    out_dir / "blackbox_transfer_box.png")
+
+    # ── Overview anglais 3 panneaux (transfer/score/decision), style article ──
+    fig_blackbox_overview(res_dir, ds, eps, out_dir)
 
     # ── Blackbox défendu vs baseline ──
     bb_def = load_blackbox_baseline(res_dir, ds, eps, suffix="_defended")
@@ -346,6 +661,9 @@ def main():
     datasets = ["swat", "batadal"] if args.dataset == "both" else [args.dataset]
     for ds in datasets:
         run_dataset(ds, args.eps)
+    if args.dataset == "both":
+        fig_blackbox_overview_combined(args.eps, datasets=tuple(datasets))
+        fig_defense_overview_combined(args.eps, datasets=tuple(datasets))
 
 
 if __name__ == "__main__":
