@@ -429,18 +429,23 @@ def fig_blackbox_overview_combined(eps, datasets=("swat", "batadal")):
 
 # ══════════════════════════════════════════════════════════════
 # OVERVIEW DÉFENSES COMBINÉ — SWaT + BATADAL, 1 panneau par modèle
-# (baseline vs. défenses restantes), hachure = dataset. Défenses
-# à base de Square exclues (résultats contre-productifs).
+# (baseline vs. défenses restantes), hachure = dataset. Seule
+# AT-Square (MLP) est exclue — résultats contre-productifs sur
+# Square/NES et pas le temps de la corriger avant la deadline.
+# Aug-Square / Aug-Square-Iter (LogReg/XGBoost) restent incluses.
 # ══════════════════════════════════════════════════════════════
 
-FAMILY_COLOR = {"Baseline": "#B0B0B0", "FGSM": "#D55E00", "PGD": "#7570B3"}
-FAMILY_LABEL = {"Baseline": "Baseline", "FGSM": "FGSM-based defense", "PGD": "PGD-based defense"}
+FAMILY_COLOR = {"Baseline": "#A8A8A8", "FGSM": "#FF4D5E", "Square": "#00C2A8", "PGD": "#7B2FF7"}
+FAMILY_LABEL = {"Baseline": "Baseline", "FGSM": "FGSM-based defense",
+                "Square": "Square-based defense", "PGD": "PGD-based defense"}
 
 
 def _defense_family(name):
     if name == "Baseline":
         return "Baseline"
-    return "PGD" if "PGD" in name else "FGSM"
+    if "PGD" in name:
+        return "PGD"
+    return "Square" if "Square" in name else "FGSM"
 
 
 def _bar_panel_defense(ax, df, attack_order, title, datasets, series_order):
@@ -478,7 +483,7 @@ def _bar_panel_defense(ax, df, attack_order, title, datasets, series_order):
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}%"))
 
 
-def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude_substr="square"):
+def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude=("AT-Square",)):
     print(f"\n{'═'*60}\n  PLOT DÉFENSES COMBINÉ — {' + '.join(d.upper() for d in datasets)}\n{'═'*60}")
 
     rows = []
@@ -488,7 +493,7 @@ def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude_sub
             continue
         for base_model, defenses in data.items():
             for defense, attacks in defenses.items():
-                if exclude_substr in defense.lower():
+                if defense in exclude:
                     continue
                 for attack, m in attacks.items():
                     attack_c = collapse_transfer_attack(attack)
@@ -502,7 +507,7 @@ def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude_sub
     df = (pd.DataFrame(rows)
             .groupby(["dataset", "base_model", "series", "attack"], as_index=False)["value"].mean())
 
-    attack_order = ["MI-FGSM", "VMI-FGSM", "Ensemble-MI", "Square", "NES", "HSJA", "RayS"]
+    attack_order = ["Ensemble-MI", "Square", "NES", "HSJA", "RayS"]
     models = [m for m in MODEL_ORDER if m in df["base_model"].unique()]
     if not models:
         print("  (rien à tracer) overview défenses")
@@ -514,8 +519,9 @@ def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude_sub
 
     for ax, bm in zip(axes, models):
         sub = df[df["base_model"] == bm]
+        family_rank = {"Baseline": 0, "FGSM": 1, "Square": 2, "PGD": 3}
         series_order = sorted(sub["series"].unique(),
-                              key=lambda s: (0 if s == "Baseline" else (2 if "PGD" in s else 1), s))
+                              key=lambda s: (family_rank[_defense_family(s)], s))
         _bar_panel_defense(ax, sub, attack_order,
                           f"{bm} — baseline vs. defenses (ε = {eps})", datasets, series_order)
     axes[0].set_ylabel("Attack Success Rate (ASR)")
@@ -524,8 +530,9 @@ def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude_sub
     for ax, cap in zip(axes, captions):
         ax.text(0.5, -0.30, cap, transform=ax.transAxes, ha="center", fontsize=9.5)
 
+    family_rank = {"Baseline": 0, "FGSM": 1, "Square": 2, "PGD": 3}
     families_present = sorted({_defense_family(s) for s in df["series"].unique()},
-                              key=lambda f: {"Baseline": 0, "FGSM": 1, "PGD": 2}[f])
+                              key=lambda f: family_rank[f])
     color_handles = [plt.Rectangle((0, 0), 1, 1, fc=FAMILY_COLOR[f], ec="none") for f in families_present]
     dataset_handles = [plt.Rectangle((0, 0), 1, 1, fc="white", ec="black",
                                      hatch=DATASET_HATCH[d]) for d in datasets]
