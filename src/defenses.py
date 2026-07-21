@@ -27,8 +27,8 @@ Pourquoi les défenses black-box sont OFFLINE (pas per-batch comme AT-FGSM/PGD) 
 Square est une attaque à requêtes (des centaines par exemple, batchées sur
 tout le batch). La regénérer à CHAQUE batch de CHAQUE epoch serait bien trop
 coûteux. On adopte donc, pour le MLP aussi, le même schéma "génère → accumule
-→ réentraîne" déjà utilisé pour XGBoost (--bb-rounds rounds, cf.
-augment_xgboost_iterative), au lieu du online per-batch des AT-FGSM/AT-PGD.
+→ réentraîne" déjà utilisé pour XGBoost (cf. augment_xgboost_iterative), au
+lieu du online per-batch des AT-FGSM/AT-PGD.
 
 Corrections vs ancienne version :
   1. eps d'entraînement 0.1 → 0.3 (design assumé).
@@ -38,6 +38,17 @@ Corrections vs ancienne version :
   4. BUG corrigé : le MLP s'entraînait dropout ÉTEINT (fgsm/pgd passent le
      modèle en .eval() ; on repasse en .train() avant le pas d'optimisation).
   5. Seeds fixés (numpy/torch/cuda) + DataLoader seedé → reproductible.
+  6. BUG corrigé (2026-07-21) : AT-Square (MLP) était généré avec seulement
+     300 requêtes/round sur 3 rounds (--bb-max-queries/--bb-rounds, partagés
+     avec Aug-Square-Iter XGBoost), alors que l'éval adaptative (evaluate_
+     blackbox.py) attaque Square à 2000 requêtes — écart train/eval de 6.7x,
+     jamais un problème pour Aug-Square (LogReg) / Aug-Square-Iter (XGBoost),
+     qui restent sur 300. Pour MLP spécifiquement, ce sous-budget + la faible
+     exposition (3 rounds statiques vs jusqu'à 50 epochs online pour AT-FGSM/
+     PGD) rendait la défense inefficace, voire contre-productive sur BATADAL
+     (ASR post-défense > baseline sur Square et plusieurs attaques par
+     transfert). Fix : budget/rounds dédiés MLP (--mlp-square-max-queries=2000,
+     --mlp-square-rounds=5), désormais alignés sur le budget d'éval.
 
 Si un fichier de sortie existe déjà, il est rechargé sans réentraîner (reprise).
 """
@@ -81,9 +92,15 @@ def parse_args():
     p.add_argument("--xgb-rounds", type=int,   default=3,
                    help="Nb de rounds d'augmentation itérative XGBoost")
     p.add_argument("--bb-rounds", type=int,   default=3,
-                   help="Nb de rounds d'augmentation itérative black-box (MLP/XGBoost)")
+                   help="Nb de rounds d'augmentation itérative black-box (XGBoost)")
     p.add_argument("--bb-max-queries", type=int, default=300,
                    help="Budget de requêtes Square par round (coût de la génération)")
+    p.add_argument("--mlp-square-rounds", type=int, default=5,
+                   help="Nb de rounds pour AT-Square MLP (distinct de --bb-rounds : "
+                        "corrigé 2026-07-21, cf. docstring augment_mlp_iterative)")
+    p.add_argument("--mlp-square-max-queries", type=int, default=2000,
+                   help="Budget de requêtes Square pour AT-Square MLP (distinct de "
+                        "--bb-max-queries, aligné sur le budget d'éval — corrigé 2026-07-21)")
     return p.parse_args()
 
 
@@ -232,6 +249,20 @@ def augment_mlp_iterative(mlp_w, X_train, y_train, X_val, y_val, input_size,
     X_atk = X_train[mask].astype(np.float32)
     y_atk = y_train[mask]
 
+    # BUG corrigé (2026-07-21) : le F1 val peut CHUTER round après round (le
+    # dataset cumulé grossit et un MLP frais n'y refit pas forcément mieux —
+    # observé sur BATADAL : 0.80 → 0.44 → 0.49 → 0.25 → 0.19). L'ancienne
+    # version gardait toujours le DERNIER round, même bien pire.
+    # 2e bug corrigé le même jour : sélectionner le round au F1 val le plus
+    # HAUT est encore pire — le round au F1 le plus haut est celui qui a le
+    # MOINS dévié du baseline fragile, donc le moins robuste (vérifié : sur
+    # BATADAL le round-1 à F1=0.80 est contre-productif sur les 11/11
+    # attaques, contre 4/11 avec l'ancien dernier-round à F1=0.19). Même
+    # piège déjà rencontré et corrigé pour LogReg (cf. augment_logreg
+    # ci-dessous) : on sélectionne donc le round par un score combiné
+    # F1_val − ASR_val(FGSM, eps=EVAL_EPS_FOR_SELECTION), pas par F1 seul.
+    best_overall_score, best_overall_state, best_overall_round = -1e9, None, None
+
     for r in range(1, n_rounds + 1):
         print(f"\n    ── Round {r}/{n_rounds} ──")
         print(f"    Génération X_adv sur MLP courant ({attack}, eps={eps})...")
@@ -282,7 +313,35 @@ def augment_mlp_iterative(mlp_w, X_train, y_train, X_val, y_val, input_size,
         new_model.load_state_dict(best_state)
         new_model.eval()
         current = MLPWrapper(new_model, device)
-        print(f"    MLP round {r} fitté ✓ (best val F1 {best_f1:.4f})")
+
+        # ASR_val (FGSM) sur les vrais positifs val — même logique que
+        # augment_logreg : le F1 seul favorise les rounds les moins robustes.
+        pred_val = current.predict(X_val, threshold=THRESHOLD)
+        tp_mask  = (y_val == 1) & (pred_val == 1)
+        if tp_mask.sum() == 0:
+            asr_val = 1.0
+        else:
+            X_val_atk = X_val[tp_mask].astype(np.float32)
+            y_val_atk = y_val[tp_mask]
+            X_val_adv = fgsm_mlp(current, X_val_atk, y_val_atk, eps=EVAL_EPS_FOR_SELECTION)
+            pred_adv  = current.predict(X_val_adv, threshold=THRESHOLD)
+            asr_val   = float((pred_adv == 0).mean())
+        score = best_f1 - asr_val
+        print(f"    MLP round {r} fitté ✓ (val F1 {best_f1:.4f}, "
+              f"ASR_val(FGSM,eps={EVAL_EPS_FOR_SELECTION})={asr_val*100:.1f}%, "
+              f"score={score:+.4f})")
+
+        if score > best_overall_score:
+            best_overall_score = score
+            best_overall_round = r
+            best_overall_state = {k: v.cpu().clone() for k, v in new_model.state_dict().items()}
+
+    final_model = MLP(input_size=input_size).to(device)
+    final_model.load_state_dict(best_overall_state)
+    final_model.eval()
+    current = MLPWrapper(final_model, device)
+    print(f"\n    → Meilleur round retenu : {best_overall_round}/{n_rounds} "
+          f"(score {best_overall_score:+.4f})")
 
     torch.save(current.model.state_dict(), fpath)
     print(f"\n    Sauvegardé : {fpath.name}")
@@ -500,12 +559,12 @@ def run():
                               attack="fgsm", eps=eps, n_rounds=args.xgb_rounds)
 
     print(f"\n[5/7] Augmentation itérative Square (black-box) — MLP (self, "
-          f"{args.bb_rounds} rounds, {args.bb_max_queries} requêtes/round)")
+          f"{args.mlp_square_rounds} rounds, {args.mlp_square_max_queries} requêtes/round)")
     augment_mlp_iterative(mlp_w, X_train, y_train, X_val, y_val, input_size, save, device,
-                          attack="square", eps=eps, n_rounds=args.bb_rounds,
+                          attack="square", eps=eps, n_rounds=args.mlp_square_rounds,
                           epochs=args.epochs, patience=args.patience,
                           batch_size=args.batch_size, lr=args.lr,
-                          bb_max_queries=args.bb_max_queries)
+                          bb_max_queries=args.mlp_square_max_queries)
 
     print("\n[6/7] Augmentation adverse Square (black-box) — LogReg")
     augment_logreg(logreg_w, X_train, y_train, X_val, y_val, save, attack="square", eps=eps,
