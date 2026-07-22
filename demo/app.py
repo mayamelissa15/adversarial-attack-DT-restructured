@@ -2,47 +2,31 @@
 demo/app.py : point d'entrée du support de soutenance interactif.
 
 Lance avec :
-    streamlit run demo/app.py
+    .venv/bin/streamlit run demo/app.py
 
-Toutes les données affichées sont lues directement dans results/ et
-artifacts/ (racine du projet) : rien n'est recalculé ici, et rien n'est
-inventé, un panneau sans fichier correspondant affiche "en attente".
+La page (soutenance.html) est autonome (fonts, données réelles eps=0.1,
+JS embarqués) : Streamlit sert uniquement de conteneur pour pouvoir la
+lancer avec `streamlit run` comme l'ancienne démo multi-pages, qu'elle
+remplace. Pour mettre à jour les chiffres, régénérer soutenance.html
+(voir la conversation Claude qui l'a produit) plutôt qu'éditer ce fichier.
 """
 
-import sys
 from pathlib import Path
 
 import streamlit as st
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from lib import theme
-from lib.data import DATASET_META
+import streamlit.components.v1 as components
 
 st.set_page_config(
-    page_title="Démonstration Attaques Adversariales",
+    page_title="Robustesse Adversariale — Console de Soutenance",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
-theme.inject_css()
 
-with st.sidebar:
-    st.markdown("**Robustesse adversariale des IDS industriels**")
-    st.segmented_control(
-        "Jeu de données",
-        options=["swat", "batadal"],
-        format_func=lambda k: DATASET_META[k]["name"],
-        default="swat",
-        key="dataset",
-    )
-    st.divider()
+st.markdown(
+    "<style>.block-container{padding:0 !important;max-width:100% !important;} "
+    "header[data-testid='stHeader']{height:0;} iframe{display:block;}</style>",
+    unsafe_allow_html=True,
+)
 
-pages = [
-    st.Page("views/demonstration.py", title="Attaques", default=True),
-    st.Page("views/contexte.py", title="Données"),
-    st.Page("views/modeles.py", title="Modèles"),
-    st.Page("views/defenses.py", title="Défenses"),
-]
-
-nav = st.navigation(pages)
-nav.run()
+html_path = Path(__file__).resolve().parent / "soutenance.html"
+components.html(html_path.read_text(encoding="utf-8"), height=2400, scrolling=True)
