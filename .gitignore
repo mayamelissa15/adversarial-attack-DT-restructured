@@ -10,5 +10,6 @@ __pycache__/
 .DS_Store
 data/raw/swat/merged.csv
 Note.txt
-resume_these_adv.pdf
+#resume_these_adv.pdf
+/home/mellazmaya/these_adv/resume_these_adv.pdf
 /home/mellazmaya/these_adv/results/rapports/blackbox_attaques_defenses.pdf

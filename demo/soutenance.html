@@ -150,6 +150,7 @@ body{
 .send-btn:active,.defend-btn-inline:active{transform:translateY(0);}
 .send-btn:focus-visible,.defend-btn-inline:focus-visible{outline:2px solid var(--ink);outline-offset:3px;}
 .send-btn:disabled,.defend-btn-inline:disabled{opacity:.4;cursor:default;transform:none;}
+.defend-btn-chart{width:auto;padding:9px 18px;}
 .twin-model-pick{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px;}
 .twin-model-pick button{appearance:none;border:none;background:transparent;font-family:var(--font-mono);font-size:10px;font-weight:600;padding:6px 9px;border-radius:999px;cursor:pointer;color:var(--ink-secondary);}
 .twin-model-pick button.active{color:#fff;}
@@ -208,7 +209,7 @@ body{
 
   <header class="hd">
     <div>
-      <p class="hd-eyebrow">Soutenance de thèse · robustesse adversariale</p>
+      <p class="hd-eyebrow">Soutenance de projet de fin d'études · robustesse adversariale</p>
       <h1 class="hd-title">Détection d'intrusion sous perturbation adversariale</h1>
       <p class="hd-sub">Jumeau physique, jumeau numérique et matrice d'évaluation attaque / défense en direct.</p>
     </div>
@@ -280,6 +281,7 @@ body{
       <div class="chart-head">
         <h3 id="chart-title">Taux de réussite de l'attaque (ASR) · Square</h3>
         <div class="chart-legend" id="chart-legend"></div>
+        <button class="defend-btn-inline defend-btn-chart" id="defend-btn-2" type="button" disabled>Défendre</button>
       </div>
       <div class="chart-svg-wrap"><svg class="chart-svg" id="chart-svg" viewBox="0 0 640 260"></svg></div>
       <div class="chart-note" id="chart-note">Chiffres réels mesurés à eps=0.1, sur données de test réelles.</div>
@@ -575,8 +577,7 @@ document.getElementById("send-btn").addEventListener("click", function(){
       dots.forEach(function(d){ d.remove(); });
       transmitted = true;
       state.defenseActive = false;
-      const db = document.getElementById("defend-btn");
-      db.disabled = false; db.classList.remove("active"); db.textContent = "Défendre";
+      updateDefendButtons();
       applyVerdict(false);
       renderChart(false);
       btn.disabled = false;
@@ -586,19 +587,28 @@ document.getElementById("send-btn").addEventListener("click", function(){
   requestAnimationFrame(frame);
 });
 
-document.getElementById("defend-btn").addEventListener("click", function(){
+function updateDefendButtons(){
+  [document.getElementById("defend-btn"), document.getElementById("defend-btn-2")].forEach(function(db){
+    db.disabled = !transmitted;
+    db.classList.toggle("active", state.defenseActive);
+    db.textContent = state.defenseActive ? "Défense active" : "Défendre";
+  });
+}
+function toggleDefense(){
   if (!transmitted) return;
   state.defenseActive = !state.defenseActive;
-  this.classList.toggle("active", state.defenseActive);
-  this.textContent = state.defenseActive ? "Défense active" : "Défendre";
+  updateDefendButtons();
   applyVerdict(state.defenseActive);
   renderChart(true);
-});
+}
+document.getElementById("defend-btn").addEventListener("click", toggleDefense);
+document.getElementById("defend-btn-2").addEventListener("click", toggleDefense);
 
 /* ============== before / after chart ============== */
 const CX0=110, CX1=530, CY_TOP=30, CY_BOT=210;
 function chartY(v){ return CY_BOT - (v/100)*(CY_BOT-CY_TOP); }
 let chartCurrent = {mlp:null, logreg:null, xgboost:null};
+let chartSecondOp = 0;
 
 function buildChartStatic(){
   const svg = document.getElementById("chart-svg");
@@ -610,6 +620,7 @@ function buildChartStatic(){
   });
   html += '<text x="'+CX0+'" y="234" text-anchor="middle" font-family="IBM Plex Mono" font-weight="600" font-size="11" fill="var(--ink-secondary)">SANS DÉFENSE</text>';
   html += '<text x="'+CX1+'" y="234" text-anchor="middle" font-family="IBM Plex Mono" font-weight="600" font-size="11" fill="var(--ink-secondary)">AVEC DÉFENSE</text>';
+  html += '<text id="chart-hint" x="'+CX1+'" y="'+((CY_TOP+CY_BOT)/2)+'" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="var(--ink-tertiary)">clique Défendre pour voir l\'effet</text>';
   MODEL_ORDER.forEach(function(m){
     const c = modelColor(m);
     html += '<line id="chart-line-'+m+'" x1="'+CX0+'" x2="'+CX1+'" stroke="'+c+'" stroke-width="2.5" stroke-linecap="round"/>';
@@ -630,7 +641,7 @@ function separateLabelY(ys){
   }
   return out;
 }
-function paintChart(undefVals, secondVals){
+function paintChart(undefVals, secondVals, secondOp){
   const y0raw = {}, y1raw = {};
   MODEL_ORDER.forEach(function(m){ y0raw[m]=chartY(undefVals[m]); y1raw[m]=chartY(secondVals[m]); });
   const y0lab = separateLabelY(y0raw), y1lab = separateLabelY(y1raw);
@@ -638,36 +649,44 @@ function paintChart(undefVals, secondVals){
     const y0 = y0raw[m], y1 = y1raw[m];
     const line = document.getElementById("chart-line-"+m);
     line.setAttribute("y1", y0); line.setAttribute("y2", y1);
+    line.style.opacity = secondOp;
     document.getElementById("chart-dot0-"+m).setAttribute("cx", CX0);
     document.getElementById("chart-dot0-"+m).setAttribute("cy", y0);
-    document.getElementById("chart-dot1-"+m).setAttribute("cx", CX1);
-    document.getElementById("chart-dot1-"+m).setAttribute("cy", y1);
+    const dot1 = document.getElementById("chart-dot1-"+m);
+    dot1.setAttribute("cx", CX1); dot1.setAttribute("cy", y1);
+    dot1.style.opacity = secondOp;
     const l0 = document.getElementById("chart-label0-"+m);
     l0.setAttribute("x", CX0-12); l0.setAttribute("y", y0lab[m]+4); l0.textContent = undefVals[m].toFixed(0)+"%";
     const l1 = document.getElementById("chart-label1-"+m);
     l1.setAttribute("x", CX1+12); l1.setAttribute("y", y1lab[m]+4); l1.textContent = secondVals[m].toFixed(0)+"%";
+    l1.style.opacity = secondOp;
   });
+  document.getElementById("chart-hint").style.opacity = 1-secondOp;
 }
 function renderChart(animate){
   const data = currentAttackData();
   const undefVals = {}; MODEL_ORDER.forEach(function(m){ undefVals[m] = data.undef[JSON_KEY[m]]; });
   const target = {}; MODEL_ORDER.forEach(function(m){ target[m] = state.defenseActive ? data.def[JSON_KEY[m]] : data.undef[JSON_KEY[m]]; });
+  const targetOp = state.defenseActive ? 1 : 0;
 
   if (!animate){
     MODEL_ORDER.forEach(function(m){ chartCurrent[m] = target[m]; });
-    paintChart(undefVals, target);
+    chartSecondOp = targetOp;
+    paintChart(undefVals, target, targetOp);
     return;
   }
   const from = Object.assign({}, chartCurrent);
+  const fromOp = chartSecondOp;
   const dur = 550, t0 = performance.now();
   function frame(now){
     const p = Math.min(1, (now-t0)/dur);
     const e = 1-Math.pow(1-p,3);
     const cur = {};
     MODEL_ORDER.forEach(function(m){ cur[m] = from[m] + (target[m]-from[m])*e; });
-    paintChart(undefVals, cur);
+    const op = fromOp + (targetOp-fromOp)*e;
+    paintChart(undefVals, cur, op);
     if (p<1){ requestAnimationFrame(frame); }
-    else { MODEL_ORDER.forEach(function(m){ chartCurrent[m] = target[m]; }); }
+    else { MODEL_ORDER.forEach(function(m){ chartCurrent[m] = target[m]; }); chartSecondOp = targetOp; }
   }
   requestAnimationFrame(frame);
 }
@@ -679,8 +698,7 @@ function onScenarioChange(){
   buildPhysicalSchema();
   transmitted = false;
   state.defenseActive = false;
-  const db = document.getElementById("defend-btn");
-  db.disabled = true; db.classList.remove("active"); db.textContent = "Défendre";
+  updateDefendButtons();
   resetVerdict();
   document.getElementById("chart-title").textContent = "Taux de réussite de l'attaque (ASR) · "+attackMeta(state.attack).label;
   renderChart(false);
