@@ -60,6 +60,10 @@ def parse_args():
     p.add_argument("--patience",   type=int,   default=5)
     p.add_argument("--batch-size", type=int,   default=2048)
     p.add_argument("--lr",         type=float, default=1e-3)
+    p.add_argument("--n-seeds",    type=int,   default=1,
+                   help="nombre de seeds essayés pour le MLP ; on garde celui qui "
+                        "maximise le F1 sur le VALIDATION set (défaut 1 = comportement "
+                        "historique, seed=SEED uniquement)")
     return p.parse_args()
 
 
@@ -149,50 +153,69 @@ def main():
     imbalance = n_neg / n_pos
 
     # ══════════════════════════════════════════════════════════
-    # MLP
+    # MLP — entraînement pour UN seed donné (early stopping sur VAL)
     # ══════════════════════════════════════════════════════════
-    print("\n=== MLP ===")
-    set_all_seeds(SEED)                       # re-seed juste avant l'init du modèle
-    model = MLP(X_train.shape[1]).to(device)
+    def train_mlp_one_seed(seed):
+        set_all_seeds(seed)
+        model = MLP(X_train.shape[1]).to(device)
 
-    Xtr_t  = torch.tensor(X_train)
-    ytr_t  = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
-    Xval_t = torch.tensor(X_val).to(device)
+        Xtr_t  = torch.tensor(X_train)
+        ytr_t  = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+        Xval_t = torch.tensor(X_val).to(device)
 
-    gen = torch.Generator(); gen.manual_seed(SEED)   # shuffle reproductible
-    loader = DataLoader(TensorDataset(Xtr_t, ytr_t),
-                        batch_size=args.batch_size, shuffle=True, generator=gen)
+        gen = torch.Generator(); gen.manual_seed(seed)   # shuffle reproductible
+        loader = DataLoader(TensorDataset(Xtr_t, ytr_t),
+                            batch_size=args.batch_size, shuffle=True, generator=gen)
 
-    criterion = nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([imbalance], dtype=torch.float32, device=device)
-    )
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        criterion = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([imbalance], dtype=torch.float32, device=device)
+        )
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    best_f1, no_improve, best_state = -1.0, 0, None
-    for epoch in range(args.epochs):
-        model.train()
-        for xb, yb in loader:
-            xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
-            criterion(model(xb), yb).backward()
-            optimizer.step()
+        best_f1, no_improve, best_state = -1.0, 0, None
+        for epoch in range(args.epochs):
+            model.train()
+            for xb, yb in loader:
+                xb, yb = xb.to(device), yb.to(device)
+                optimizer.zero_grad()
+                criterion(model(xb), yb).backward()
+                optimizer.step()
 
-        # Early stopping sur la VALIDATION (jamais sur le test)
-        model.eval()
-        with torch.no_grad():
-            proba_val = torch.sigmoid(model(Xval_t)).cpu().numpy().flatten()
-        f1_val = f1_score(y_val, (proba_val >= THRESHOLD).astype(int), zero_division=0)
+            # Early stopping sur la VALIDATION (jamais sur le test)
+            model.eval()
+            with torch.no_grad():
+                proba_val = torch.sigmoid(model(Xval_t)).cpu().numpy().flatten()
+            f1_val = f1_score(y_val, (proba_val >= THRESHOLD).astype(int), zero_division=0)
 
-        if f1_val > best_f1:
-            best_f1, no_improve = f1_val, 0
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-        else:
-            no_improve += 1
-            if no_improve >= args.patience:
-                print(f"  Early stopping @ epoch {epoch+1} (best val F1 = {best_f1:.4f})")
-                break
+            if f1_val > best_f1:
+                best_f1, no_improve = f1_val, 0
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            else:
+                no_improve += 1
+                if no_improve >= args.patience:
+                    break
 
-    model.load_state_dict(best_state)
+        model.load_state_dict(best_state)
+        return model, best_f1
+
+    # ══════════════════════════════════════════════════════════
+    # MLP — sélection multi-seed (n_seeds=1 → comportement historique)
+    # ══════════════════════════════════════════════════════════
+    print(f"\n=== MLP ({args.n_seeds} seed{'s' if args.n_seeds > 1 else ''}) ===")
+    seeds_to_try = [SEED + i for i in range(args.n_seeds)]
+    best_seed, model, best_val_f1 = None, None, -1.0
+    for seed in seeds_to_try:
+        candidate, val_f1 = train_mlp_one_seed(seed)
+        marker = ""
+        if val_f1 > best_val_f1:
+            best_val_f1, model, best_seed = val_f1, candidate, seed
+            marker = "  ← meilleur jusqu'ici"
+        if args.n_seeds > 1:
+            print(f"  seed={seed:4d}  val F1={val_f1:.4f}{marker}")
+
+    if args.n_seeds > 1:
+        print(f"  → seed retenu = {best_seed} (val F1 = {best_val_f1:.4f})")
+
     torch.save(model.state_dict(), A / "best_mlp.pt")
 
     model.eval()
@@ -238,7 +261,11 @@ def main():
         print(classification_report(y_test, y_pred,
                                     target_names=["Normal", "Attack"], zero_division=0))
 
-    results["_meta"] = {"dataset": ds, "threshold": THRESHOLD, "seed": SEED}
+    results["_meta"] = {
+        "dataset": ds, "threshold": THRESHOLD, "seed": SEED,
+        "mlp_n_seeds": args.n_seeds, "mlp_best_seed": best_seed,
+        "mlp_best_val_f1": round(best_val_f1, 4),
+    }
     with open(R / "train_results.json", "w") as f:
         json.dump(results, f, indent=2)
 
