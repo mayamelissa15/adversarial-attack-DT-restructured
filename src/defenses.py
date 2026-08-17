@@ -472,6 +472,17 @@ def augment_logreg(logreg_w, X_train, y_train, X_val, y_val, save_dir, attack, e
 def augment_xgboost_iterative(xgb_w, X_train, y_train, X_val, y_val,
                               save_dir, device, attack, eps, n_rounds,
                               bb_max_queries=300):
+    """
+    Augmentation itérative XGBoost + sélection du round par validation.
+
+    BUG corrigé (2026-08-16) : l'ancienne version gardait inconditionnellement
+    le DERNIER round, même si un round antérieur était meilleur — aucun score
+    n'était calculé. Même piège déjà rencontré et corrigé pour
+    augment_mlp_iterative (cf. son docstring : le F1_val peut chuter round
+    après round sur un dataset cumulé qui grossit). Fix : même score combiné
+    F1_val − ASR_val(FGSM, eps=EVAL_EPS_FOR_SELECTION) que pour LogReg/MLP,
+    calculé à CHAQUE round, on garde le meilleur.
+    """
     fpath = save_dir / f"xgb_iter_{attack}_r{n_rounds}.json"
     if fpath.exists():
         print(f"    {fpath.name} déjà présent → chargement direct")
@@ -484,6 +495,8 @@ def augment_xgboost_iterative(xgb_w, X_train, y_train, X_val, y_val,
     mask  = (y_train == 1)
     X_atk = X_train[mask].astype(np.float32)
     y_atk = y_train[mask]
+
+    best_overall_score, best_overall_model, best_overall_round = -1e9, None, None
 
     for r in range(1, n_rounds + 1):
         print(f"\n    ── Round {r}/{n_rounds} ──")
@@ -514,6 +527,33 @@ def augment_xgboost_iterative(xgb_w, X_train, y_train, X_val, y_val,
         new_xgb.fit(X_aug, y_aug, eval_set=[(X_val, y_val)], verbose=False)
         current = XGBoostWrapper(new_xgb)
         print(f"    XGB round {r} fitté ✓")
+
+        # Sélection du round : F1_val − ASR_val(FGSM) — même logique que
+        # augment_logreg / augment_mlp_iterative (cf. leurs docstrings).
+        pred_val = current.predict(X_val, threshold=THRESHOLD)
+        f1_val   = f1_score(y_val, pred_val, zero_division=0)
+        tp_mask  = (y_val == 1) & (pred_val == 1)
+        if tp_mask.sum() == 0:
+            asr_val = 1.0
+        else:
+            X_val_atk = X_val[tp_mask].astype(np.float32)
+            y_val_atk = y_val[tp_mask]
+            X_val_adv = fgsm_xgb(current, X_val_atk, y_val_atk, eps=EVAL_EPS_FOR_SELECTION)
+            pred_adv  = current.predict(X_val_adv, threshold=THRESHOLD)
+            asr_val   = float((pred_adv == 0).mean())
+        score = f1_val - asr_val
+        print(f"    Round {r}: F1_val={f1_val:.4f}  "
+              f"ASR_val(FGSM,eps={EVAL_EPS_FOR_SELECTION})={asr_val*100:.1f}%  "
+              f"score={score:+.4f}")
+
+        if score > best_overall_score:
+            best_overall_score  = score
+            best_overall_round  = r
+            best_overall_model  = new_xgb
+
+    current = XGBoostWrapper(best_overall_model)
+    print(f"\n    → Meilleur round retenu : {best_overall_round}/{n_rounds} "
+          f"(score {best_overall_score:+.4f})")
 
     current.model.save_model(str(fpath))
     print(f"\n    Sauvegardé : {fpath.name}")

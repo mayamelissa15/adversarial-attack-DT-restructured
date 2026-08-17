@@ -28,24 +28,46 @@ from common import results_dir, RESULTS_DIR
 
 
 # ══════════════════════════════════════════════════════════════
-# PALETTE — Okabe-Ito (colorblind-safe), une couleur fixe par modèle,
-# utilisée partout de façon cohérente (jamais recyclée pour autre chose).
+# PALETTE — validée colorblind-safe (script dataviz/validate_palette.js,
+# CVD ΔE ≥ 8 sur toutes les paires, mode light, --pairs all). Une couleur
+# fixe par modèle, utilisée partout de façon cohérente (jamais recyclée
+# pour autre chose). Volontairement distincte du bleu/orange/vert terne
+# utilisé auparavant.
 # ══════════════════════════════════════════════════════════════
 
 MODEL_COLOR = {
-    "MLP":     "#0072B2",
-    "LogReg":  "#E69F00",
-    "XGBoost": "#009E73",
+    "MLP":     "#4A3AA7",  # violet
+    "LogReg":  "#EDA100",  # ambre
+    "XGBoost": "#E34948",  # rouge/corail
 }
 MODEL_ORDER = ["MLP", "LogReg", "XGBoost"]
-GRID_COLOR  = "#B0B0B0"
+GRID_COLOR  = "#C3C2B7"
+
+plt.rcParams.update({
+    "font.family":      "sans-serif",
+    "font.size":         10.5,
+    "axes.titlesize":    11,
+    "axes.labelsize":    10.5,
+    "xtick.labelsize":   9.5,
+    "ytick.labelsize":   9.5,
+    "legend.fontsize":   9.5,
+    "figure.facecolor":  "white",
+    "axes.facecolor":    "white",
+    "savefig.facecolor": "white",
+})
 
 
 def _style_axis(ax):
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.yaxis.grid(True, ls="--", alpha=0.35, color=GRID_COLOR, zorder=0)
+    ax.yaxis.grid(True, ls="-", alpha=0.25, color=GRID_COLOR, lw=0.7, zorder=0)
     ax.set_axisbelow(True)
+
+
+def _savefig_png(fig, outp, dpi=300, **kwargs):
+    """Sauvegarde en PNG haute résolution."""
+    fig.savefig(outp, dpi=dpi, **kwargs)
+    print(f"  ✓ {outp.name}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -355,19 +377,19 @@ def _bar_panel_combined(ax, df, attack_order, title, value_col="asr"):
                 errs.append(float(row["std"].fillna(0).iloc[0]) * 100 if not row.empty else 0)
             xpos = x + (bar_idx - n_bars / 2 + 0.5) * w
             ax.bar(xpos, vals, width=w * 0.92, color=MODEL_COLOR[model],
-                   hatch=DATASET_HATCH[ds], edgecolor="white", linewidth=0.5,
+                   hatch=DATASET_HATCH[ds], edgecolor="white", linewidth=0.6,
                    yerr=errs, capsize=1.5, zorder=3)
             for xi, v in zip(xpos, vals):
                 if not np.isnan(v):
-                    ax.text(xi, v + 2, f"{v:.0f}", ha="center", va="bottom", fontsize=7)
+                    ax.text(xi, v + 2, f"{v:.0f}", ha="center", va="bottom", fontsize=7.5)
             finite = [v + e for v, e in zip(vals, errs) if not np.isnan(v)]
             if finite:
                 ymax = max(ymax, *finite)
             bar_idx += 1
 
     ax.set_xticks(x)
-    ax.set_xticklabels(attacks, fontsize=9)
-    ax.set_title(title, fontsize=9.5, fontweight="bold")
+    ax.set_xticklabels(attacks, fontsize=9.5)
+    ax.set_title(title, fontsize=10, fontweight="bold")
     ax.set_ylim(0, min(ymax + 22, 112))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}%"))
 
@@ -422,9 +444,8 @@ def fig_blackbox_overview_combined(eps, datasets=("swat", "batadal")):
     out_dir = RESULTS_DIR / "combined" / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
     outp = out_dir / "overview_blackbox_all_en.png"
-    fig.savefig(outp, dpi=180, bbox_inches="tight")
+    _savefig_png(fig, outp, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ {outp}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -435,7 +456,7 @@ def fig_blackbox_overview_combined(eps, datasets=("swat", "batadal")):
 # Aug-Square / Aug-Square-Iter (LogReg/XGBoost) restent incluses.
 # ══════════════════════════════════════════════════════════════
 
-FAMILY_COLOR = {"Baseline": "#A8A8A8", "FGSM": "#FF4D5E", "Square": "#00C2A8", "PGD": "#7B2FF7"}
+FAMILY_COLOR = {"Baseline": "#6B6B68", "FGSM": "#1BAF7A", "Square": "#2A78D6", "PGD": "#C93F7C"}
 FAMILY_LABEL = {"Baseline": "Baseline", "FGSM": "FGSM-based defense",
                 "Square": "Square-based defense", "PGD": "PGD-based defense"}
 
@@ -470,15 +491,15 @@ def _bar_panel_defense(ax, df, attack_order, title, datasets, series_order):
                 vals.append(float(row["value"].iloc[0]) if not row.empty else np.nan)
             xpos = x + (bar_idx - n_bars / 2 + 0.5) * w
             ax.bar(xpos, vals, width=w * 0.92, color=color, hatch=DATASET_HATCH[ds],
-                  edgecolor="white", linewidth=0.5, zorder=3)
+                  edgecolor="white", linewidth=0.6, zorder=3)
             finite = [v for v in vals if not np.isnan(v)]
             if finite:
                 ymax = max(ymax, *finite)
             bar_idx += 1
 
     ax.set_xticks(x)
-    ax.set_xticklabels(attacks, fontsize=8.5, rotation=20, ha="right")
-    ax.set_title(title, fontsize=9.5, fontweight="bold")
+    ax.set_xticklabels(attacks, fontsize=9, rotation=20, ha="right")
+    ax.set_title(title, fontsize=10, fontweight="bold")
     ax.set_ylim(0, min(ymax + 15, 108))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}%"))
 
@@ -545,9 +566,8 @@ def fig_defense_overview_combined(eps, datasets=("swat", "batadal"), exclude=("A
     out_dir = RESULTS_DIR / "combined" / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
     outp = out_dir / "overview_defenses_all_en.png"
-    fig.savefig(outp, dpi=180, bbox_inches="tight")
+    _savefig_png(fig, outp, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ {outp}")
 
 
 # ══════════════════════════════════════════════════════════════
